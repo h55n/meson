@@ -335,7 +335,6 @@ def _target_prefixed_tool(exelist: T.List[str], tool: str) -> T.Optional[str]:
     return None
 
 
-
 def _detect_c_or_cpp_compiler(env: 'Environment', lang: str, for_machine: MachineChoice, *, override_compilers: T.Optional[T.List[T.List[str]]] = None) -> Compiler:
     """Shared implementation for finding the C or C++ compiler to use.
 
