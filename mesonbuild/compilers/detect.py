@@ -296,6 +296,18 @@ def detect_static_linker(env: 'Environment', compiler: Compiler) -> StaticLinker
 # Compilers
 # =========
 
+def _is_msvc_cl_like_name(name: str) -> bool:
+    """Whether a compiler executable name is MSVC's cl or clang-cl.
+
+    Toolchains such as nixpkgs prefix their compilers with the target triple
+    (e.g. x86_64-pc-windows-msvc-clang-cl), so accept a '-clang-cl' suffix in
+    addition to the plain names.
+    """
+    if name in {'cl', 'cl.exe', 'clang-cl', 'clang-cl.exe'}:
+        return True
+    return name.endswith('-clang-cl') or name.endswith('-clang-cl.exe')
+
+
 
 def _detect_c_or_cpp_compiler(env: 'Environment', lang: str, for_machine: MachineChoice, *, override_compilers: T.Optional[T.List[T.List[str]]] = None) -> Compiler:
     """Shared implementation for finding the C or C++ compiler to use.
@@ -317,7 +329,7 @@ def _detect_c_or_cpp_compiler(env: 'Environment', lang: str, for_machine: Machin
     for compiler in compilers:
         compiler_name = os.path.basename(compiler[0])
 
-        if any(os.path.basename(x) in {'cl', 'cl.exe', 'clang-cl', 'clang-cl.exe'} for x in compiler):
+        if any(_is_msvc_cl_like_name(os.path.basename(x)) for x in compiler):
             # Watcom C provides its own cl.exe clone that mimics an older
             # version of Microsoft's compiler. Since Watcom's cl.exe is
             # just a wrapper, we skip using it if we detect its presence
@@ -484,7 +496,17 @@ def _detect_c_or_cpp_compiler(env: 'Environment', lang: str, for_machine: Machin
             else:
                 target = 'unknown target'
             cls = c.ClangClCCompiler if lang == 'c' else cpp.ClangClCPPCompiler
-            linker = guess_win_linker(env, ['lld-link'], cls, version, for_machine)
+            # Prefer a target-prefixed lld-link matching a target-prefixed
+            # clang-cl driver (e.g. nixpkgs), falling back to plain lld-link.
+            lld = 'lld-link'
+            base = os.path.basename(compiler[0])
+            for raw, lld_name in (('clang-cl.exe', 'lld-link.exe'), ('clang-cl', 'lld-link')):
+                if base.endswith('-' + raw):
+                    candidate = base[:-len(raw)] + lld_name
+                    if shutil.which(candidate):
+                        lld = candidate
+                    break
+            linker = guess_win_linker(env, [lld], cls, version, for_machine)
             return cls(
                 compiler, version, for_machine, env, target,
                 linker=linker)
