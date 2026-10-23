@@ -35,22 +35,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - NAME: gccx86ninja
-            MSYSTEM: MINGW32
-            MSYS2_ARCH: i686
-            MSYS2_CURSES: ncurses
-            COMPILER: gcc
-            TOOLCHAIN: toolchain
           - NAME: gccx64ninja
-            MSYSTEM: MINGW64
-            MSYS2_ARCH: x86_64
+            MSYSTEM: UCRT64
+            MSYS2_ARCH: ucrt-x86_64
             MSYS2_CURSES: pdcurses
             COMPILER: gcc
             TOOLCHAIN: toolchain
           - NAME: clangx64ninja
-            MSYSTEM: MINGW64
-            MSYS2_ARCH: x86_64
-            MSYS2_CURSES:
+            MSYSTEM: UCRT64
+            MSYS2_ARCH: ucrt-x86_64
+            MSYS2_CURSES: ncurses
             COMPILER: clang
             TOOLCHAIN: clang
     env:
@@ -83,8 +77,8 @@ jobs:
             mingw-w64-${{ matrix.MSYS2_ARCH }}-python-lxml
             mingw-w64-${{ matrix.MSYS2_ARCH }}-python-setuptools
             mingw-w64-${{ matrix.MSYS2_ARCH }}-python-pip
-            mingw-w64-${{ matrix.MSYS2_ARCH }}-${{ matrix.MSYSTEM != 'MINGW32' && 'objfw' || 'ninja' }}
-            mingw-w64-${{ matrix.MSYS2_ARCH }}-${{ matrix.MSYSTEM != 'MINGW32' && 'llvm' || 'ninja' }}
+            mingw-w64-${{ matrix.MSYS2_ARCH }}-objfw
+            mingw-w64-${{ matrix.MSYS2_ARCH }}-llvm
             mingw-w64-${{ matrix.MSYS2_ARCH }}-${{ matrix.TOOLCHAIN }}
 
       - name: Install dependencies
@@ -99,11 +93,11 @@ jobs:
           unzip pypy3.8-v7.3.9-win64.zip
           mv pypy3.8-v7.3.9-win64/* ./
           popd
-        if: ${{ matrix.MSYS2_ARCH == 'x86_64' }}
+        if: ${{ matrix.MSYS2_ARCH == 'ucrt-x86_64' }}
 
       - name: Run Tests
         run: |
-          if [[ "${{ matrix.MSYS2_ARCH }}" == "x86_64" ]]; then
+          if [[ "${{ matrix.MSYS2_ARCH }}" == "ucrt-x86_64" ]]; then
             # There apparently is no clean way to add to the PATH in the
             # previous step?
             # See for instance https://github.com/msys2/setup-msys2/issues/171

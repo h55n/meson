@@ -11,6 +11,7 @@ import json
 import operator
 import os
 import pickle
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -52,7 +53,7 @@ from mesonbuild.mesonlib import (
 from mesonbuild.options import OptionKey, UserBooleanOption
 from mesonbuild.interpreter.type_checking import (
     STR_PARG, INT_PARG, BOOL_PARG, STR_OARG, INT_OARG, STR_VARG,
-    INSTALL_MODE_KW, in_set_validator, NoneType,
+    INSTALL_MODE_KW, in_set_validator, NoneType, _pkgconfig_define_feature_validator,
 )
 from mesonbuild.dependencies.pkgconfig import PkgConfigDependency, PkgConfigInterface, PkgConfigCLI
 from mesonbuild.programs import ExternalProgram
@@ -64,6 +65,19 @@ from run_tests import get_fake_env, get_fake_options
 from .helpers import IS_CI, chdir, skipIfNoPkgconfig
 
 class InternalTests(unittest.TestCase):
+
+    @unittest.skipIf(is_windows() or is_cygwin() or os.geteuid() == 0, 'needs a directory the test user cannot traverse')
+    def test_cmake_user_registry_unreadable_home(self):
+        from mesonbuild.dependencies.cmake import CMakeDependency
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / 'home'
+            (home / '.cmake' / 'packages' / 'Foo').mkdir(parents=True)
+            with mock.patch.dict(os.environ, {'HOME': str(home)}):
+                self.assertTrue(CMakeDependency._in_cmake_user_registry('Foo', 'foo'))
+                self.assertFalse(CMakeDependency._in_cmake_user_registry('Bar', 'bar'))
+                home.chmod(0)
+                CMakeDependency._cached_isdir.cache_clear()
+                self.assertFalse(CMakeDependency._in_cmake_user_registry('Foo', 'foo'))
 
     def test_cmake_skip_compiler_test_invalid(self):
         properties = mesonbuild.envconfig.Properties({'cmake_skip_compiler_test': True})
@@ -182,6 +196,7 @@ class InternalTests(unittest.TestCase):
 
     def test_version_number(self):
         self.assertEqual(search_version('foobar 1.2.3'), '1.2.3')
+        self.assertEqual(search_version('foobar 1.2.3-4and5.6-7-'), '1.2.3-4and5.6-7-')
         self.assertEqual(search_version('1.2.3'), '1.2.3')
         self.assertEqual(search_version('foobar 2016.10.28 1.2.3'), '1.2.3')
         self.assertEqual(search_version('2016.10.28 1.2.3'), '1.2.3')
@@ -197,6 +212,10 @@ class InternalTests(unittest.TestCase):
         self.assertEqual(search_version(r'''(FooBar LLVM-Linux 5.0.0) clang version 21.9.0
 Target: riscv64-unknown-linux-gnu
 Thread model: posix'''), '21.9.0')
+        self.assertEqual(search_version(r'''Ubuntu clang version 14.0.0-1ubuntu1.1
+Target: x86_64-pc-linux-gnu
+Thread model: posix
+InstalledDir: /usr/bin'''), '14.0.0-1ubuntu1.1')
 
         # Literal output of mvn
         self.assertEqual(search_version(r'''\
@@ -775,6 +794,12 @@ Thread model: posix'''), '21.9.0')
                 self.assertEqual(qcc.get_preprocess_only_args(), ['-E', '-Wp,-P'])
                 # get_preprocess_to_file_args() builds on get_preprocess_only_args().
                 self.assertEqual(qcc.get_preprocess_to_file_args(), ['-E', '-Wp,-P', suffix])
+
+    def test_pkgconfig_define_feature_validator(self):
+        # One pair is a flat list of two strings, and needs no newer Meson.
+        self.assertEqual(list(_pkgconfig_define_feature_validator([])), [])
+        self.assertEqual(list(_pkgconfig_define_feature_validator(['prefix', '/tmp'])), [])
+        self.assertEqual(len(list(_pkgconfig_define_feature_validator(['prefix', '/tmp', 'libdir', '/x']))), 1)
 
     def test_qcc_unsupported_features_raise(self):
         # qcc/q++ have no alternate-linker-selection equivalent, so Meson
@@ -2671,6 +2696,120 @@ Thread model: posix'''), '21.9.0')
 
         with self.assertRaises(InvalidArguments):
             _(None, mock.Mock(), [], {'install_mode': ['rw-rw-r--', True]})
+
+    def test_detect_clang_cl_with_target_prefix(self) -> None:
+        """A target-prefixed clang-cl (e.g. nixpkgs'
+        x86_64-pc-windows-msvc-clang-cl) must be detected as clang-cl, not
+        as a GNU-style clang, and its target-prefixed lld-link must be
+        preferred when it exists."""
+        import mesonbuild.compilers.detect
+        import mesonbuild.linkers.detect
+
+        help_out = textwrap.dedent("""\
+            OVERVIEW: clang LLVM compiler
+
+            CL.EXE COMPATIBILITY OPTIONS:
+              /?                      Display available options
+            """)
+        version_out = textwrap.dedent("""\
+            clang version 17.0.6
+            Target: x86_64-pc-windows-msvc
+            Thread model: posix
+            InstalledDir: /nix/store/fake/bin
+            """)
+        lld_out = "LLD 17.0.6\n"
+
+        def fake_popen(cmd, *args, **kwargs):
+            if cmd[-1] == '/?':
+                out = help_out
+            elif 'lld-link' in os.path.basename(cmd[0]):
+                out = lld_out
+            else:
+                out = version_out
+            return mock.Mock(returncode=0), out, ''
+
+        env = get_fake_env()
+        fake_cc = ['x86_64-pc-windows-msvc-clang-cl']
+        seen_linkers = []
+        real_which = shutil.which
+
+        def fake_which(name, *args, **kwargs):
+            # The prefixed lld-link exists; a bare lld-link does not.
+            if name == 'x86_64-pc-windows-msvc-lld-link':
+                return '/fake/bin/' + name
+            if name == 'lld-link':
+                return None
+            return real_which(name, *args, **kwargs)
+
+        def recording_popen(cmd, *args, **kwargs):
+            if 'lld-link' in os.path.basename(cmd[0]):
+                seen_linkers.append(cmd[0])
+            return fake_popen(cmd, *args, **kwargs)
+
+        with mock.patch.object(mesonbuild.compilers.detect, '_get_compilers',
+                               return_value=([fake_cc], None)), \
+                mock.patch('mesonbuild.compilers.detect.Popen_safe_logged',
+                           side_effect=fake_popen), \
+                mock.patch('mesonbuild.compilers.detect.Popen_safe',
+                           side_effect=fake_popen), \
+                mock.patch('mesonbuild.linkers.detect.Popen_safe',
+                           side_effect=recording_popen), \
+                mock.patch('mesonbuild.compilers.detect.shutil.which',
+                           side_effect=fake_which):
+            cc = detect_c_compiler(env, MachineChoice.HOST)
+
+        self.assertIsInstance(cc, ClangClCompiler)
+        self.assertEqual(cc.version, '17.0.6')
+        self.assertIn('x86_64-pc-windows-msvc-lld-link', seen_linkers)
+
+    def test_detect_static_linker_target_prefixed_llvm_lib(self) -> None:
+        """With a target-prefixed clang-cl, detect_static_linker must prefer
+        the target-prefixed llvm-lib (e.g. nixpkgs'
+        x86_64-pc-windows-msvc-llvm-lib) over the plain llvm-lib, which such
+        toolchains do not ship."""
+        from mesonbuild.compilers.detect import detect_static_linker
+        from mesonbuild.compilers.detect import defaults as detect_defaults
+        from mesonbuild.linkers.linkers import ArLinker
+
+        env = get_fake_env()
+        compiler = mock.Mock()
+        compiler.language = 'c'
+        compiler.for_machine = MachineChoice.HOST
+        compiler.get_argument_syntax.return_value = 'msvc'
+        compiler.get_exelist.return_value = ['x86_64-pc-windows-msvc-clang-cl']
+
+        probed = []
+
+        def fake_popen(cmd, *args, **kwargs):
+            probed.append(cmd)
+            return mock.Mock(returncode=0), 'LLVM version 17.0.6\n', ''
+
+        def fake_which(name, *args, **kwargs):
+            if name == 'x86_64-pc-windows-msvc-llvm-lib':
+                return '/fake/bin/' + name
+            return None
+
+        with mock.patch('mesonbuild.compilers.detect.Popen_safe_logged',
+                        side_effect=fake_popen), \
+                mock.patch('mesonbuild.compilers.detect.Popen_safe',
+                           side_effect=fake_popen), \
+                mock.patch('mesonbuild.mesonlib.Popen_safe',
+                           side_effect=fake_popen), \
+                mock.patch('mesonbuild.compilers.detect.shutil.which',
+                           side_effect=fake_which), \
+                mock.patch.dict('mesonbuild.compilers.detect.defaults'):
+            # On Windows with Visual Studio the MSVC 'lib' is tried before
+            # llvm-lib; drop it so the test only covers the llvm-lib order.
+            detect_defaults.pop('vs_static_linker', None)
+            linker = detect_static_linker(env, compiler)
+
+        self.assertIsInstance(linker, ArLinker)
+        self.assertEqual(linker.get_exelist(),
+                         ['x86_64-pc-windows-msvc-llvm-lib'])
+        # A lib-style archiver is probed with /?, not --version
+        self.assertEqual(probed[0],
+                         ['x86_64-pc-windows-msvc-llvm-lib', '/?'])
+
 
     def test_detect_cpu_family(self) -> None:
         """Test the various cpu families that we detect and normalize.

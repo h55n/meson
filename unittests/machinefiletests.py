@@ -95,6 +95,30 @@ class MachineFileStoreTests(TestCase):
         finally:
             os.unlink(fname)
 
+class SubprojectsUpdateTests(TestCase):
+
+    def test_subprojects_update_relpath_cross_mount(self):
+        """msubprojects.run() must not crash with an unhandled ValueError
+        when os.path.relpath() cannot compute a relative path (as happens
+        on Windows when the source directory is on a different mount/UNC
+        share than the current working directory)."""
+        import mesonbuild.msubprojects as msubprojects
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            options = mock.Mock()
+            options.sourcedir = tmpdir
+            options.allow_insecure = False
+
+            def raising_relpath(*args, **kwargs):
+                raise ValueError("path is on mount 'Z:', start on mount 'C:'")
+
+            with mock.patch('os.path.relpath', side_effect=raising_relpath):
+                # No meson.build in tmpdir, so run() should reach the
+                # "does not seem to be a Meson source directory" error
+                # path and return 1, rather than raising ValueError.
+                result = msubprojects.run(options)
+            self.assertEqual(result, 1)
+
 class NativeFileTests(BasePlatformTests):
 
     def setUp(self):
@@ -625,6 +649,23 @@ class NativeFileTests(BasePlatformTests):
                 break
         else:
             self.fail('Did not find werror in build options?')
+
+    def test_builtin_options_backend(self):
+        # Backend options from the machine file must exist for the backend
+        # that is in use, like those from the command line.
+        if self.backend is not Backend.ninja:
+            raise SkipTest('Test uses options of the Ninja backend')
+        testcase = os.path.join(self.common_test_dir, '1 trivial')
+
+        config = self.helper_create_native_file({'built-in options': {'backend_max_links': 2}})
+        self.init(testcase, extra_args=['--native-file', config])
+        self.assertEqual(self.getconf('backend_max_links'), 2)
+
+        self.new_builddir()
+        config = self.helper_create_native_file({'built-in options': {'backend_startup_project': 'foo'}})
+        with self.assertRaises(subprocess.CalledProcessError) as cm:
+            self.init(testcase, extra_args=['--native-file', config])
+        self.assertIn('Unknown option', cm.exception.stdout)
 
     def test_builtin_options_conf_overrides_env(self):
         testcase = os.path.join(self.common_test_dir, '2 cpp')

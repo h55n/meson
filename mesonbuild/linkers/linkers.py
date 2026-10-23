@@ -330,6 +330,29 @@ class DynamicLinker(metaclass=mesonlib.SimpleABC):
         #Only used by AIX.
         return []
 
+    def prepare_rpaths(self, raw_rpaths: T.Tuple[str, ...], build_dir: str, from_dir: str) -> T.List[str]:
+        # The rpaths we write must be relative if they point to the build dir,
+        # because otherwise they have different length depending on the build
+        # directory. This breaks reproducible builds.
+        rel_rpaths: T.List[str] = []
+        abs_rpaths: T.List[str] = []
+        for p in raw_rpaths:
+            if p == from_dir:
+                rel_rpaths.append('') # make it '$ORIGIN/', not '$ORIGIN/.'
+            elif path_has_root(p):
+                # Skip external library if the build machine can't run binaries
+                if self.environment.can_run_binaries(self.for_machine):
+                    abs_rpaths.append(p) # These can be outside of build dir.
+            else:
+                rel_rpaths.append(
+                    os.path.relpath(os.path.join(build_dir, p), os.path.join(build_dir, from_dir)))
+
+        # We want rpaths that point inside our build dir to always override
+        # those pointing to other places in the file system. This is so built
+        # binaries prefer our libraries to the ones that may lie somewhere
+        # in the file system, such as /lib/x86_64-linux-gnu.
+        return rel_rpaths + abs_rpaths
+
 
 if T.TYPE_CHECKING:
     StaticLinkerBase = StaticLinker
@@ -611,36 +634,6 @@ class EmxomfArLinker(ArLinker):
     def get_std_link_args(self, env: 'Environment', is_thin: bool) -> T.List[str]:
         return ['cr']
 
-def prepare_rpaths(raw_rpaths: T.Tuple[str, ...], build_dir: str, from_dir: str) -> T.List[str]:
-    # The rpaths we write must be relative if they point to the build dir,
-    # because otherwise they have different length depending on the build
-    # directory. This breaks reproducible builds.
-    internal_format_rpaths = [evaluate_rpath(p, build_dir, from_dir) for p in raw_rpaths]
-    ordered_rpaths = order_rpaths(internal_format_rpaths)
-    return ordered_rpaths
-
-
-def order_rpaths(rpath_list: T.List[str]) -> T.List[str]:
-    # We want rpaths that point inside our build dir to always override
-    # those pointing to other places in the file system. This is so built
-    # binaries prefer our libraries to the ones that may lie somewhere
-    # in the file system, such as /lib/x86_64-linux-gnu.
-    #
-    # The correct thing to do here would be C++'s std::stable_partition.
-    # Python standard library does not have it, so replicate it with
-    # sort, which is guaranteed to be stable.
-    return sorted(rpath_list, key=os.path.isabs)
-
-
-def evaluate_rpath(p: str, build_dir: str, from_dir: str) -> str:
-    if p == from_dir:
-        return '' # relpath errors out in this case
-    elif path_has_root(p):
-        return p # These can be outside of build dir.
-    else:
-        return os.path.relpath(os.path.join(build_dir, p), os.path.join(build_dir, from_dir))
-
-
 class PosixDynamicLinkerMixin(DynamicLinkerBase):
 
     """Mixin class for POSIX-ish linkers.
@@ -776,7 +769,7 @@ class GnuLikeDynamicLinkerMixin(DynamicLinkerBase):
             return ([], set())
         args: T.List[str] = []
         origin_placeholder = '$ORIGIN'
-        processed_rpaths = prepare_rpaths(rpath_paths, build_dir, from_dir)
+        processed_rpaths = self.prepare_rpaths(rpath_paths, build_dir, from_dir)
         # Need to deduplicate rpaths, as macOS's install_name_tool
         # is *very* allergic to duplicate -delete_rpath arguments
         # when calling depfixer on installation.
@@ -784,11 +777,12 @@ class GnuLikeDynamicLinkerMixin(DynamicLinkerBase):
         rpath_dirs_to_remove: T.Set[bytes] = set()
         for p in all_paths:
             rpath_dirs_to_remove.add(p.encode('utf8'))
-        # Build_rpath is used as-is (it is usually absolute).
         if target.build_rpath != '':
-            all_paths.add(target.build_rpath)
-            for p in target.build_rpath.split(':'):
-                rpath_dirs_to_remove.add(p.encode('utf8'))
+            # Only include relative paths if the build machine can't run binaries
+            paths = [p for p in target.build_rpath.split(':')
+                     if self.environment.can_run_binaries(self.for_machine) or not path_has_root(p)]
+            all_paths.update(paths)
+            rpath_dirs_to_remove.update(p.encode('utf8') for p in paths)
         if extra_paths:
             all_paths.update(extra_paths)
 
@@ -959,10 +953,13 @@ class AppleDynamicLinker(PosixDynamicLinkerMixin, DynamicLinker):
         # @loader_path is the equivalent of $ORIGIN on macOS
         # https://stackoverflow.com/q/26280738
         origin_placeholder = '@loader_path'
-        processed_rpaths = prepare_rpaths(rpath_paths, build_dir, from_dir)
+        processed_rpaths = self.prepare_rpaths(rpath_paths, build_dir, from_dir)
         all_paths = mesonlib.OrderedSet([os.path.join(origin_placeholder, p) for p in processed_rpaths])
         if target.build_rpath != '':
-            all_paths.update(target.build_rpath.split(':'))
+            # Only include relative paths if the build machine can't run binaries
+            paths = [p for p in target.build_rpath.split(':')
+                     if self.environment.can_run_binaries(self.for_machine) or not path_has_root(p)]
+            all_paths.update(paths)
         if extra_paths:
             all_paths.update(extra_paths)
         for rp in all_paths:
@@ -1409,10 +1406,13 @@ class NAGDynamicLinker(PosixDynamicLinkerMixin, DynamicLinker):
             return ([], set())
         args: T.List[str] = []
         origin_placeholder = '$ORIGIN'
-        processed_rpaths = prepare_rpaths(rpath_paths, build_dir, from_dir)
+        processed_rpaths = self.prepare_rpaths(rpath_paths, build_dir, from_dir)
         all_paths = mesonlib.OrderedSet([os.path.join(origin_placeholder, p) for p in processed_rpaths])
         if target.build_rpath != '':
-            all_paths.add(target.build_rpath)
+            # Only include relative paths if the build machine can't run binaries
+            paths = [p for p in target.build_rpath.split(':')
+                     if self.environment.can_run_binaries(self.for_machine) or not path_has_root(p)]
+            all_paths.update(paths)
         if extra_paths:
             all_paths.update(extra_paths)
         for rp in all_paths:
@@ -1685,15 +1685,17 @@ class SolarisDynamicLinker(PosixDynamicLinkerMixin, DynamicLinker):
         rpath_paths = target.determine_rpath_dirs()
         if not rpath_paths and not target.install_rpath and not target.build_rpath and not extra_paths:
             return ([], set())
-        processed_rpaths = prepare_rpaths(rpath_paths, build_dir, from_dir)
+        processed_rpaths = self.prepare_rpaths(rpath_paths, build_dir, from_dir)
         all_paths = mesonlib.OrderedSet([os.path.join('$ORIGIN', p) for p in processed_rpaths])
         rpath_dirs_to_remove: T.Set[bytes] = set()
         for p in all_paths:
             rpath_dirs_to_remove.add(p.encode('utf8'))
         if target.build_rpath != '':
-            all_paths.add(target.build_rpath)
-            for p in target.build_rpath.split(':'):
-                rpath_dirs_to_remove.add(p.encode('utf8'))
+            # Only include relative paths if the build machine can't run binaries
+            paths = [p for p in target.build_rpath.split(':')
+                     if self.environment.can_run_binaries(self.for_machine) or not path_has_root(p)]
+            all_paths.update(paths)
+            rpath_dirs_to_remove.update(p.encode('utf8') for p in paths)
         if extra_paths:
             all_paths.update(extra_paths)
 
@@ -1767,9 +1769,11 @@ class AIXDynamicLinker(PosixDynamicLinkerMixin, DynamicLinker):
         if install_rpath != '':
             all_paths.add(install_rpath)
         if build_rpath != '':
-            all_paths.add(build_rpath)
-            for p in build_rpath.split(':'):
-                rpath_dirs_to_remove.add(p.encode('utf8'))
+            # Only include relative paths if the build machine can't run binaries
+            paths = [p for p in build_rpath.split(':')
+                     if self.environment.can_run_binaries(self.for_machine) or not path_has_root(p)]
+            all_paths.update(paths)
+            rpath_dirs_to_remove.update(p.encode('utf8') for p in paths)
         for p in rpath_paths:
             path = os.path.join(build_dir, p)
             all_paths.add(path)

@@ -74,7 +74,7 @@ from .helpers import (
 )
 
 if T.TYPE_CHECKING:
-    from mesonbuild.compilers.compilers import Language
+    from mesonbuild.compilers.compilers import Compiler, Language
     from mesonbuild.environment import Environment
 
 UNIT_MACHINEFILE_DIR = Path(__file__).parent / 'machinefiles'
@@ -221,6 +221,13 @@ class AllPlatformTests(BasePlatformTests):
         self.assertEqual(conf_str(['#define VAR xxx @VAR@ yyy @VAR@'], confdata, 'cmake@'), '#define VAR xxx value yyy value')
         self.assertEqual(conf_str(['#cmakedefine VAR xxx ${VAR} yyy ${VAR}'], confdata, 'cmake'), '#define VAR xxx value yyy value\n')
         self.assertEqual(conf_str(['#define VAR xxx ${VAR} yyy ${VAR}'], confdata, 'cmake'), '#define VAR xxx value yyy value')
+
+        # An empty replacement must not hide the next variable
+        confdata.values = {'A': ('', 'description'), 'B': ('', 'description'), 'P': ('pkg', 'description')}
+        self.assertEqual(conf_str(['@A@@B@@P@'], confdata, 'cmake@'), 'pkg')
+        self.assertEqual(conf_str(['@A@@B@ x @P@'], confdata, 'cmake'), ' x pkg')
+        self.assertEqual(conf_str(['${A}${B}${P}'], confdata, 'cmake'), 'pkg')
+        self.assertEqual(conf_str(['x @A@@P@ @B@@P@'], confdata, 'cmake@'), 'x pkg pkg')
 
         # Handles meson format exceptions
         #   Unknown format
@@ -3230,6 +3237,26 @@ class AllPlatformTests(BasePlatformTests):
         with open(os.path.join(self.builddir, 'nosubst-nocopy2.txt'), 'rb') as f:
             self.assertEqual(f.read().strip(), b'')
 
+    def test_configure_file_copy_readonly_input(self):
+        with tempfile.TemporaryDirectory() as srcdir:
+            source = os.path.join(srcdir, 'input.txt')
+            with open(source, 'w', encoding='utf-8') as f:
+                f.write('hello')
+            os.chmod(source, 0o444)
+            try:
+                with open(os.path.join(srcdir, 'meson.build'), 'w', encoding='utf-8') as f:
+                    f.write("project('test', version: '1.0')\n"
+                            "configure_file(input: 'input.txt', output: 'output.txt', copy: true)\n")
+                self.init(srcdir)
+                output = os.path.join(self.builddir, 'output.txt')
+                self.assertTrue(os.access(output, os.W_OK),
+                                'configure_file output must be writable even when source is read-only')
+                self.assertEqual(os.stat(output).st_mtime_ns, os.stat(source).st_mtime_ns,
+                                 'configure_file output must preserve source mtime')
+                self.init(srcdir, extra_args=['--reconfigure'])
+            finally:
+                os.chmod(source, 0o644)
+
     def test_dirs(self):
         with tempfile.TemporaryDirectory() as containing:
             with tempfile.TemporaryDirectory(dir=containing) as srcdir:
@@ -5133,20 +5160,49 @@ class AllPlatformTests(BasePlatformTests):
     def test_env_flags_to_linker(self) -> None:
         # Compilers that act as drivers should add their compiler flags to the
         # linker, those that do not shouldn't
-        with mock.patch.dict(os.environ, {'CFLAGS': '-DCFLAG', 'LDFLAGS': '-flto'}):
-            env = get_fake_env()
+        from mesonbuild.compilers.c import GnuCCompiler
 
-            # Get the compiler so we know which compiler class to mock.
-            cc =  detect_compiler_for(env, 'c', MachineChoice.HOST, True, '')
+        for cls, linker_driver in ((VisualStudioCCompiler, False), (GnuCCompiler, True)):
+            with self.subTest(cls.__name__):
+                self.assertEqual(cls.USED_FOR_SEPARATE_LINKING_STEP, linker_driver)
+                with mock.patch.dict(os.environ, {'CFLAGS': '-DCFLAG', 'LDFLAGS': '-flto'}):
+                    env = get_fake_env()
+                env.coredata.optstore.initialize_from_top_level_project_call({}, {}, {})
+                env.add_lang_args('c', cls, MachineChoice.HOST)
 
-            # C does have a separate linking step. It can be done through the compiler
-            # driver or not; act accordingly.
-            link_args = env.coredata.optstore.get_value_for(OptionKey(f'{cc.language}_link_args', machine=cc.for_machine))
-            assert isinstance(link_args, list), 'for mypy'
-            if cc.USED_FOR_SEPARATE_LINKING_STEP:
-                self.assertEqual(sorted(link_args), sorted(['-DCFLAG', '-flto']))
-            else:
-                self.assertEqual(sorted(link_args), sorted(['-flto']))
+                link_args = env.coredata.optstore.get_value_for(OptionKey('c_link_args'))
+                assert isinstance(link_args, list), 'for mypy'
+                if linker_driver:
+                    self.assertEqual(sorted(link_args), sorted(['-DCFLAG', '-flto']))
+                else:
+                    self.assertEqual(sorted(link_args), sorted(['-flto']))
+
+    def test_env_flags_to_linker_with_options(self) -> None:
+        # $CFLAGS are added to linker arguments from the command line too, if
+        # the compiler acts as a linker driver, but not if the compiler
+        # arguments come from the command line.
+        from mesonbuild.compilers.c import GnuCCompiler
+
+        def link_args(cls: T.Type[Compiler], cmdline: T.Dict[OptionKey, str],
+                      envvars: T.Dict[str, str]) -> T.List[str]:
+            with mock.patch.dict(os.environ, envvars):
+                env = get_fake_env()
+            env.coredata.optstore.initialize_from_top_level_project_call({}, cmdline, {})
+            env.add_lang_args('c', cls, MachineChoice.HOST)
+            value = env.coredata.optstore.get_value_for(OptionKey('c_link_args'))
+            assert isinstance(value, list), 'for mypy'
+            return value
+
+        for cls, linker_driver in ((VisualStudioCCompiler, False), (GnuCCompiler, True)):
+            with self.subTest(cls.__name__):
+                self.assertEqual(cls.USED_FOR_SEPARATE_LINKING_STEP, linker_driver)
+                extra = ['-DCFLAG'] if linker_driver else []
+                self.assertEqual(link_args(cls, {OptionKey('c_link_args'): '-DLINK'},
+                                           {'CFLAGS': '-DCFLAG'}),
+                                 ['-DLINK'] + extra)
+                self.assertEqual(link_args(cls, {OptionKey('c_args'): '-DCARG'},
+                                           {'CFLAGS': '-DCFLAG', 'LDFLAGS': '-DLDFLAG'}),
+                                 ['-DLDFLAG'])
 
     def test_install_tag(self) -> None:
         testdir = os.path.join(self.unit_test_dir, '98 install all targets')

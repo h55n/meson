@@ -1238,7 +1238,11 @@ def search_version(text: str) -> str:
             \.\d+       # Period and one or more digits
         )+              # One or more occurrences
         (
-            -[a-zA-Z0-9]+   # Hyphen and one or more alphanumeric
+            -           # Hyphen
+            [0-9a-zA-Z-]+           # One or more alphanumeric/hyphen
+            (
+                \.[0-9a-zA-Z-]+     # Period and one or more alphanumeric/hyphen
+            )*          # Zero or more occurrences
         )?              # Zero or one occurrence
     )
     (?!\S)              # Must not be followed by non-space char
@@ -1558,6 +1562,9 @@ def do_replacement_cmake(line: str, at_only: bool,
                     if not match:
                         value = variable_get(varname)
                         line = line[:index] + value + line[next_at+1:]
+                        if not value:
+                            # the next character moved to this index, look at it too
+                            continue
 
             elif not at_only and line[index:index+2] == '${':
                 bracket_count = 1
@@ -1598,6 +1605,8 @@ def do_replacement_cmake(line: str, at_only: bool,
 
                     value = variable_get(varname)
                     line = line[:index] + value + line[end_bracket:]
+                    if not value:
+                        continue
 
             index += 1
 

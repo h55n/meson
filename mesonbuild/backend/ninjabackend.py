@@ -28,7 +28,7 @@ from .. import compilers
 from .. import tooldetect
 from ..arglist import CompilerArgs
 from ..compilers import Compiler, is_library
-from ..linkers import ArLikeLinker, RSPFileSyntax, StaticLinker
+from ..linkers import ArLikeLinker, RSPFileSyntax, StaticLinker, VisualStudioLikeLinkerMixin
 from ..mesonlib import (
     File, LibType, MachineChoice, MesonBugException, MesonException, OrderedSet, PerMachine,
     ProgressBar, quote_arg, unique_list
@@ -90,15 +90,21 @@ else:
     execute_wrapper = []
     rmfile_prefix = ['rm', '-f', '{}', '&&']
 
+GCC_RSP_UNSAFE_PAT = re.compile(r'[^\w@%+=:,./-]', re.ASCII)
+
 def gcc_rsp_quote(s: str) -> str:
     # see: the function buildargv() in libiberty
     #
-    # this differs from sh-quoting in that a backslash *always* escapes the
-    # following character, even inside single quotes.
+    # Up to GCC 15 (and in clang), a backslash *always* escapes the following
+    # character, even inside single quotes.  Starting with GCC 16, backslashes
+    # inside single quotes are literal as in sh.  Avoid quotes and escape
+    # every special character with a backslash, which works the same way in
+    # both cases.  The exception is newlines, for which a backslash is a line
+    # continuation in sh; place them in single quotes instead.
 
-    s = s.replace('\\', '\\\\')
-
-    return quote_func(s)
+    if not s:
+        return "''"
+    return GCC_RSP_UNSAFE_PAT.sub(lambda m: "'\n'" if m.group() == '\n' else '\\' + m.group(), s)
 
 # a conservative estimate of the command-line length limit
 rsp_threshold = mesonlib.get_rsp_threshold()
@@ -2130,8 +2136,16 @@ class NinjaBackend(backends.Backend):
         deps: T.List[str] = []
         project_deps: T.List[RustDep] = []
         args: T.List[str] = []
+        linked_deps: T.Set[str] = set()
 
         def _link_library(libname: str, static: bool, bundle: bool = False) -> None:
+            # rustc will fail with "overriding link modifiers from
+            # command line is not supported" if a modifier is applied
+            # and the library appears more than once
+            if libname in linked_deps:
+                return
+            linked_deps.add(libname)
+
             orig_libname = libname
             type_ = 'static' if static else 'dylib'
             modifiers = []
@@ -2216,6 +2230,19 @@ class NinjaBackend(backends.Backend):
                 elif a.startswith('-L'):
                     args.append(a)
                     continue
+                elif a.startswith('-l') and isinstance(rustc.linker, VisualStudioLikeLinkerMixin):
+                    # The MSVC linker does not support -l, and rustc does not go
+                    # through a conversion path like unix_args_to_native(), so don't
+                    # use -Clink-arg= in that case; pass the option to rustc so that
+                    # it is looked up and converted.  Do not do it for POSIX linkers
+                    # because rustc reorders libraries, and this breaks GNU ld which
+                    # resolves symbols left to right.
+                    if a.startswith('-l:'):
+                        static = a.endswith(('.a', '.lib'))
+                        _link_library(a[3:], static)
+                    else:
+                        args.append(a)
+                    continue
                 elif a.startswith('-F'):
                     path = a[2:]
                     args.append(f'-Lframework={path}')
@@ -2271,7 +2298,14 @@ class NinjaBackend(backends.Backend):
         if has_rust_shared_deps:
             args += ['-C', 'prefer-dynamic']
         if has_shared_deps or has_rust_shared_deps:
-            args += self.get_build_rpath_args(target, rustc)
+            # rustc's sysroot is only needed to find Rust dylibs (and a
+            # dynamically linked libstd) from rustup installations. A program
+            # that links libstd statically must not carry the toolchain's
+            # library directory in its runpath, and the entry also cannot be
+            # removed at install time, which makes 'meson install' fail when
+            # install_rpath is longer than the build-time rpath.
+            extra_paths = [rustc.get_target_libdir()] if has_rust_shared_deps else None
+            args += self.get_build_rpath_args(target, rustc, extra_paths)
 
         return deps, project_deps, args
 
@@ -3809,7 +3843,8 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         self.add_build(elem)
         return obj_list
 
-    def get_build_rpath_args(self, target: build.BuildTarget, linker: T.Union[Compiler, StaticLinker]) -> T.List[str]:
+    def get_build_rpath_args(self, target: build.BuildTarget, linker: T.Union[Compiler, StaticLinker],
+                             extra_paths: T.Optional[T.List[str]] = None) -> T.List[str]:
         if has_path_sep(target.name):
             # Target names really should not have slashes in them, but
             # unfortunately we did not check for that and some downstream projects
@@ -3821,7 +3856,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         (rpath_args, target.rpath_dirs_to_remove) = (
             linker.build_rpath_args(self.environment.get_build_dir(),
                                     target_slashname_workaround_dir,
-                                    target))
+                                    target, extra_paths))
         return rpath_args
 
     def generate_link(self, target: build.BuildTarget, outname: str, obj_list: T.List[str],
