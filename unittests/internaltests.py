@@ -2768,6 +2768,7 @@ InstalledDir: /usr/bin'''), '14.0.0-1ubuntu1.1')
         x86_64-pc-windows-msvc-llvm-lib) over the plain llvm-lib, which such
         toolchains do not ship."""
         from mesonbuild.compilers.detect import detect_static_linker
+        from mesonbuild.compilers.detect import defaults as detect_defaults
         from mesonbuild.linkers.linkers import ArLinker
 
         env = get_fake_env()
@@ -2795,7 +2796,11 @@ InstalledDir: /usr/bin'''), '14.0.0-1ubuntu1.1')
                 mock.patch('mesonbuild.mesonlib.Popen_safe',
                            side_effect=fake_popen), \
                 mock.patch('mesonbuild.compilers.detect.shutil.which',
-                           side_effect=fake_which):
+                           side_effect=fake_which), \
+                mock.patch.dict('mesonbuild.compilers.detect.defaults'):
+            # On Windows with Visual Studio the MSVC 'lib' is tried before
+            # llvm-lib; drop it so the test only covers the llvm-lib order.
+            detect_defaults.pop('vs_static_linker', None)
             linker = detect_static_linker(env, compiler)
 
         self.assertIsInstance(linker, ArLinker)
