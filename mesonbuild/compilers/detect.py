@@ -189,6 +189,9 @@ def detect_static_linker(env: 'Environment', compiler: Compiler) -> StaticLinker
             trials = [defaults['cuda_static_linker']] + trials
         elif compiler.get_argument_syntax() == 'msvc':
             trials = [defaults['clang_cl_static_linker']]
+            prefixed_lib = _target_prefixed_tool(compiler.get_exelist(), 'llvm-lib')
+            if prefixed_lib:
+                trials = [[prefixed_lib]] + trials
             if 'vs_static_linker' in defaults:
                 trials = [defaults['vs_static_linker']] + trials
         elif m.is_os2() and env.coredata.optstore.get_value_for(OptionKey('os2_emxomf')):
@@ -225,7 +228,10 @@ def detect_static_linker(env: 'Environment', compiler: Compiler) -> StaticLinker
     for linker in trials:
         linker_name = os.path.basename(linker[0])
 
-        if any(os.path.basename(x) in {'lib', 'lib.exe', 'llvm-lib', 'llvm-lib.exe', 'xilib', 'xilib.exe'} for x in linker):
+        lib_names = {'lib', 'lib.exe', 'llvm-lib', 'llvm-lib.exe', 'xilib', 'xilib.exe'}
+        if any((b := os.path.basename(x).lower()) in lib_names
+               or b.endswith('-llvm-lib') or b.endswith('-llvm-lib.exe')
+               for x in linker):
             arg = '/?'
         elif linker_name in {'ar2000', 'ar2000.exe', 'ar430', 'ar430.exe', 'ar6x', 'ar6x.exe'}:
             arg = '?'
@@ -306,6 +312,27 @@ def _is_msvc_cl_like_name(name: str) -> bool:
     if name in {'cl', 'cl.exe', 'clang-cl', 'clang-cl.exe'}:
         return True
     return name.endswith('-clang-cl') or name.endswith('-clang-cl.exe')
+
+
+def _target_prefixed_tool(exelist: T.List[str], tool: str) -> T.Optional[str]:
+    """Tool matching a target-prefixed clang-cl driver, if it is on PATH.
+
+    Cross toolchains such as nixpkgs ship target-triple-prefixed LLVM tools
+    (e.g. x86_64-pc-windows-msvc-llvm-lib) and often no unprefixed llvm-lib.
+    Derive the prefix from the compiler's own executable name and check the
+    prefixed tool exists rather than probing a name that is not there.
+    """
+    if not exelist:
+        return None
+    name = os.path.basename(exelist[0])
+    for driver in ('clang-cl.exe', 'clang-cl'):
+        suffix = '-' + driver
+        if name.lower().endswith(suffix):
+            candidate = exelist[0][:-len(driver)] + tool
+            if shutil.which(candidate):
+                return candidate
+            return None
+    return None
 
 
 
