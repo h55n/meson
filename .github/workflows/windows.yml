@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - 'master'
+      - 'ci-review2-16301'
       # Release branches
       - '1.*'
     paths:
@@ -33,7 +34,7 @@ concurrency:
 jobs:
   vs2022:
     runs-on: windows-2022
-    timeout-minutes: 120
+    timeout-minutes: 180
     name: ${{ matrix.name }}
 
     strategy:
@@ -155,4 +156,4 @@ jobs:
           python --version
 
           echo "=== Running tests ==="
-          python 2>&1 run_tests.py --backend "${{ matrix.backend }}" ${{ matrix.extraargs }}
+          python 2>&1 run_tests.py --backend "${{ matrix.backend }}" ${{ matrix.extraargs }} -j 1

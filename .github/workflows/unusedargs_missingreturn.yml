@@ -16,6 +16,7 @@ concurrency:
 on:
   push:
     paths:
+    - "unittests/internaltests.py"
     - ".github/workflows/unusedargs_missingreturn.yml"
     - "test cases/cmake/**"
     - "test cases/common/**"
