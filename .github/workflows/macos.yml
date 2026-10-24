@@ -8,6 +8,7 @@ on:
   push:
     branches:
       - master
+      - ci-base-16301
       # Stable branches such as 0.56 or 1.0
       - '[0-9]+.[0-9]+'
     paths:
