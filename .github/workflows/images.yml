@@ -14,6 +14,7 @@ on:
   pull_request:
     branches:
       - master
+      - ci-review-16301
     paths:
       - 'ci/ciimage/**'
       - '.github/workflows/images.yml'
