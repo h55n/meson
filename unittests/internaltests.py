@@ -11,7 +11,6 @@ import json
 import operator
 import os
 import pickle
-import shutil
 import stat
 import subprocess
 import tempfile
