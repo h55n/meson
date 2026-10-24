@@ -2696,70 +2696,30 @@ InstalledDir: /usr/bin'''), '14.0.0-1ubuntu1.1')
         with self.assertRaises(InvalidArguments):
             _(None, mock.Mock(), [], {'install_mode': ['rw-rw-r--', True]})
 
-    def test_detect_clang_cl_with_target_prefix(self) -> None:
-        """A target-prefixed clang-cl (e.g. nixpkgs'
-        x86_64-pc-windows-msvc-clang-cl) must be detected as clang-cl, not
-        as a GNU-style clang, and its target-prefixed lld-link must be
-        preferred when it exists."""
-        import mesonbuild.compilers.detect
-        import mesonbuild.linkers.detect
+    def test_compute_clang_cl_tool_name(self) -> None:
+        from mesonbuild.compilers.detect import compute_clang_cl_tool_name
 
-        help_out = textwrap.dedent("""\
-            OVERVIEW: clang LLVM compiler
-
-            CL.EXE COMPATIBILITY OPTIONS:
-              /?                      Display available options
-            """)
-        version_out = textwrap.dedent("""\
-            clang version 17.0.6
-            Target: x86_64-pc-windows-msvc
-            Thread model: posix
-            InstalledDir: /nix/store/fake/bin
-            """)
-        lld_out = "LLD 17.0.6\n"
-
-        def fake_popen(cmd, *args, **kwargs):
-            if cmd[-1] == '/?':
-                out = help_out
-            elif 'lld-link' in os.path.basename(cmd[0]):
-                out = lld_out
-            else:
-                out = version_out
-            return mock.Mock(returncode=0), out, ''
-
-        env = get_fake_env()
-        fake_cc = ['x86_64-pc-windows-msvc-clang-cl']
-        seen_linkers = []
-        real_which = shutil.which
-
-        def fake_which(name, *args, **kwargs):
-            # The prefixed lld-link exists; a bare lld-link does not.
-            if name == 'x86_64-pc-windows-msvc-lld-link':
-                return '/fake/bin/' + name
-            if name == 'lld-link':
-                return None
-            return real_which(name, *args, **kwargs)
-
-        def recording_popen(cmd, *args, **kwargs):
-            if 'lld-link' in os.path.basename(cmd[0]):
-                seen_linkers.append(cmd[0])
-            return fake_popen(cmd, *args, **kwargs)
-
-        with mock.patch.object(mesonbuild.compilers.detect, '_get_compilers',
-                               return_value=([fake_cc], None)), \
-                mock.patch('mesonbuild.compilers.detect.Popen_safe_logged',
-                           side_effect=fake_popen), \
-                mock.patch('mesonbuild.compilers.detect.Popen_safe',
-                           side_effect=fake_popen), \
-                mock.patch('mesonbuild.linkers.detect.Popen_safe',
-                           side_effect=recording_popen), \
-                mock.patch('mesonbuild.compilers.detect.shutil.which',
-                           side_effect=fake_which):
-            cc = detect_c_compiler(env, MachineChoice.HOST)
-
-        self.assertIsInstance(cc, ClangClCompiler)
-        self.assertEqual(cc.version, '17.0.6')
-        self.assertIn('x86_64-pc-windows-msvc-lld-link', seen_linkers)
+        cases = [
+            ('clang-cl', 'llvm-lib', 'llvm-lib'),
+            ('clang-cl.exe', 'llvm-lib', 'llvm-lib.exe'),
+            ('x86_64-pc-windows-msvc-clang-cl', 'llvm-lib',
+             'x86_64-pc-windows-msvc-llvm-lib'),
+            ('x86_64-pc-windows-msvc-clang-cl.exe', 'lld-link',
+             'x86_64-pc-windows-msvc-lld-link.exe'),
+            (os.path.join('tools', 'clang-cl'), 'lld-link',
+             os.path.join('tools', 'lld-link')),
+            (os.path.join('tools', 'target-clang-cl.exe'), 'llvm-lib',
+             os.path.join('tools', 'target-llvm-lib.exe')),
+            ('CLANG-CL.EXE', 'lld-link', 'lld-link.EXE'),
+            ('cl', 'llvm-lib', None),
+            ('clang', 'lld-link', None),
+            ('notclang-cl', 'lld-link', None),
+            ('clang-clxexe', 'lld-link', None),
+            ('target-clang-cl-extra', 'llvm-lib', None),
+        ]
+        for driver, tool, expected in cases:
+            with self.subTest(driver=driver, tool=tool):
+                self.assertEqual(compute_clang_cl_tool_name([driver], tool), expected)
 
     def test_detect_static_linker_target_prefixed_llvm_lib(self) -> None:
         """With a target-prefixed clang-cl, detect_static_linker must prefer

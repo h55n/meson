@@ -189,8 +189,8 @@ def detect_static_linker(env: 'Environment', compiler: Compiler) -> StaticLinker
             trials = [defaults['cuda_static_linker']] + trials
         elif compiler.get_argument_syntax() == 'msvc':
             trials = [defaults['clang_cl_static_linker']]
-            prefixed_lib = _target_prefixed_tool(compiler.get_exelist(), 'llvm-lib')
-            if prefixed_lib:
+            prefixed_lib = compute_clang_cl_tool_name(compiler.get_exelist(), 'llvm-lib')
+            if prefixed_lib and shutil.which(prefixed_lib):
                 trials = [[prefixed_lib]] + trials
             if 'vs_static_linker' in defaults:
                 trials = [defaults['vs_static_linker']] + trials
@@ -314,24 +314,12 @@ def _is_msvc_cl_like_name(name: str) -> bool:
     return name.endswith('-clang-cl') or name.endswith('-clang-cl.exe')
 
 
-def _target_prefixed_tool(exelist: T.List[str], tool: str) -> T.Optional[str]:
-    """Tool matching a target-prefixed clang-cl driver, if it is on PATH.
-
-    Cross toolchains such as nixpkgs ship target-triple-prefixed LLVM tools
-    (e.g. x86_64-pc-windows-msvc-llvm-lib) and often no unprefixed llvm-lib.
-    Derive the prefix from the compiler's own executable name and check the
-    prefixed tool exists rather than probing a name that is not there.
-    """
-    if not exelist:
-        return None
-    name = os.path.basename(exelist[0])
-    for driver in ('clang-cl.exe', 'clang-cl'):
-        suffix = '-' + driver
-        if name.lower().endswith(suffix):
-            candidate = exelist[0][:-len(driver)] + tool
-            if shutil.which(candidate):
-                return candidate
-            return None
+def compute_clang_cl_tool_name(exelist: T.List[str], tool: str) -> T.Optional[str]:
+    """Compute a sibling LLVM tool name for a plain or prefixed clang-cl."""
+    directory, name = os.path.split(exelist[0])
+    match = re.fullmatch(r'(.*?-|)clang-cl(\.exe)?', name, re.IGNORECASE)
+    if match:
+        return os.path.join(directory, match[1] + tool + (match[2] or ''))
     return None
 
 
@@ -524,14 +512,9 @@ def _detect_c_or_cpp_compiler(env: 'Environment', lang: str, for_machine: Machin
             cls = c.ClangClCCompiler if lang == 'c' else cpp.ClangClCPPCompiler
             # Prefer a target-prefixed lld-link matching a target-prefixed
             # clang-cl driver (e.g. nixpkgs), falling back to plain lld-link.
-            lld = 'lld-link'
-            base = os.path.basename(compiler[0])
-            for raw, lld_name in (('clang-cl.exe', 'lld-link.exe'), ('clang-cl', 'lld-link')):
-                if base.endswith('-' + raw):
-                    candidate = base[:-len(raw)] + lld_name
-                    if shutil.which(candidate):
-                        lld = candidate
-                    break
+            lld = compute_clang_cl_tool_name(compiler, 'lld-link')
+            if lld is None or not shutil.which(lld):
+                lld = 'lld-link'
             linker = guess_win_linker(env, [lld], cls, version, for_machine)
             return cls(
                 compiler, version, for_machine, env, target,
