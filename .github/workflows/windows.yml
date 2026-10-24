@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - 'master'
+      - 'ci-rebased-16301'
       # Release branches
       - '1.*'
     paths:
