@@ -12,7 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        ref: [d12465d96, 1d1556274]
+        ref: [d12465d96360c69a7aae532c17945770c91f0834, 1d1556274c18487bab1e40b3e9ebe90126e49d2b]
         workers: [1, 4]
     steps:
       - uses: actions/checkout@v6
